@@ -1,4 +1,5 @@
 const API_BASE = 'https://mrmomd-production.up.railway.app/api';
+
 const Auth = {
   getAccessToken: () => localStorage.getItem('mfx_student_access'),
   getRefreshToken: () => localStorage.getItem('mfx_student_refresh'),
