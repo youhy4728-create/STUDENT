@@ -1,5 +1,5 @@
 // ===== MFX Student App =====
-const API_BASE = 'https://mrmomd-production.up.railway.app/api';
+const API = 'https://mrmomd-production.up.railway.app/api';
 
 function toast(msg) {
   let t = document.querySelector('.toast');
@@ -147,14 +147,23 @@ async function loadUnits(courseId) {
         <div class="accordion-content">
           <div style="display:flex; flex-direction:column; gap:8px;">
             ${(u.videos || []).map(v => `
-              <div style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md);">
+              <a href="video.html?id=${v.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
                 <div style="display:flex; align-items:center; gap:10px;">
                   <span>▶️</span>
                   <span>${v.title}</span>
                   ${v.watched ? '<span class="badge badge-ok">✓ شُاهد</span>' : ''}
                 </div>
                 <span style="color:var(--text-muted); font-size:0.85rem;">${v.duration || ''}</span>
-              </div>
+              </a>
+            `).join('')}
+            ${(u.presentations || []).map(p => `
+              <a href="presentation.html?id=${p.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
+                <div style="display:flex; align-items:center; gap:10px;">
+                  <span>📊</span>
+                  <span>${p.title}</span>
+                </div>
+                <span style="color:var(--text-muted); font-size:0.85rem;">${p.slideCount ? p.slideCount + ' شريحة' : 'بوربوينت'}</span>
+              </a>
             `).join('')}
             ${(u.exams || []).map(ex => `
               <div style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md);">
@@ -430,6 +439,192 @@ async function loadDashboard() {
   } catch (e) {}
 }
 
+// ===== Video player + comments =====
+let videoProgressTimer = null;
+let videoWatchState = { videoId: null, startedAt: 0, durationSeconds: 0, sentPercentage: 0 };
+
+async function loadVideoPage() {
+  const params = new URLSearchParams(location.search);
+  const id = params.get('id');
+  if (!id) { toast('❌ فيديو غير موجود'); return; }
+  try {
+    const res = await api('/videos/' + id);
+    const video = res.data;
+    if (!video) { toast('❌ الفيديو غير موجود'); return; }
+    document.getElementById('video-title').textContent = video.title || 'فيديو';
+    document.getElementById('back-to-course').href = 'course.html?id=' + video.unitId;
+    const frame = document.getElementById('video-frame');
+    if (frame && video.driveFileId) {
+      frame.src = 'https://drive.google.com/file/d/' + video.driveFileId + '/preview';
+    } else if (frame && video.driveUrl) {
+      frame.src = video.driveUrl;
+    }
+
+    videoWatchState = { videoId: id, startedAt: Date.now(), durationSeconds: parseFloat(video.durationSeconds) || 0, sentPercentage: 0 };
+    startVideoProgressTracking();
+    loadComments(id);
+  } catch (e) { toast('❌ فشل تحميل الفيديو'); }
+}
+
+function startVideoProgressTracking() {
+  if (videoProgressTimer) clearInterval(videoProgressTimer);
+  videoProgressTimer = setInterval(sendVideoProgress, 15000);
+  window.addEventListener('beforeunload', sendVideoProgress);
+}
+
+async function sendVideoProgress() {
+  if (!videoWatchState.videoId) return;
+  const watchSeconds = Math.round((Date.now() - videoWatchState.startedAt) / 1000);
+  const watchPercentage = videoWatchState.durationSeconds > 0
+    ? Math.min(100, Math.round((watchSeconds / videoWatchState.durationSeconds) * 100))
+    : Math.min(95, Math.round(watchSeconds / 3)); // rough fallback if no duration is set
+  if (watchPercentage <= videoWatchState.sentPercentage) return;
+  videoWatchState.sentPercentage = watchPercentage;
+  try {
+    await api('/videos/' + videoWatchState.videoId + '/progress', {
+      method: 'POST',
+      body: JSON.stringify({ watchSeconds, watchPercentage })
+    });
+  } catch (e) {}
+}
+
+async function loadComments(videoId) {
+  const list = document.getElementById('comments-list');
+  const empty = document.getElementById('comments-empty');
+  if (!list) return;
+  try {
+    const res = await api('/comments/video/' + videoId);
+    const comments = res.data || [];
+    list.innerHTML = '';
+    if (!comments.length) { if (empty) empty.style.display = 'block'; return; }
+    if (empty) empty.style.display = 'none';
+    const me = getUser();
+    comments.forEach(c => {
+      const div = document.createElement('div');
+      div.style.cssText = 'padding:14px; background:var(--bg); border-radius:var(--radius-md); border:1px solid var(--border);';
+      const isTeacher = c.authorRole === 'admin';
+      div.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <span style="font-weight:600; ${isTeacher ? 'color:var(--accent-light);' : ''}">${isTeacher ? '👨‍🏫 ' : ''}${escapeHtml(c.authorName || 'مستخدم')}</span>
+          <span style="color:var(--text-muted); font-size:0.75rem;">${formatDate(c.createdAt)}</span>
+        </div>
+        <p style="color:var(--text-secondary); line-height:1.7;">${escapeHtml(c.text)}</p>
+        ${(me.id === c.authorId) ? `<button class="btn btn-ghost btn-sm" style="margin-top:6px; color:var(--danger);" onclick="deleteComment('${c.id}', '${videoId}')">حذف</button>` : ''}
+      `;
+      list.appendChild(div);
+    });
+  } catch (e) { if (empty) empty.style.display = 'block'; }
+}
+
+async function postComment() {
+  const input = document.getElementById('comment-input');
+  const params = new URLSearchParams(location.search);
+  const videoId = params.get('id');
+  const text = input?.value.trim();
+  if (!text) return;
+  try {
+    const res = await api('/comments/video/' + videoId, { method: 'POST', body: JSON.stringify({ text }) });
+    if (res.ok) { input.value = ''; loadComments(videoId); }
+    else toast('❌ ' + (res.error || 'فشل إرسال التعليق'));
+  } catch (e) {}
+}
+
+async function deleteComment(commentId, videoId) {
+  try {
+    await api('/comments/' + commentId, { method: 'DELETE' });
+    loadComments(videoId);
+  } catch (e) {}
+}
+
+// ===== Presentation viewer =====
+async function loadPresentationPage() {
+  const params = new URLSearchParams(location.search);
+  const id = params.get('id');
+  if (!id) { toast('❌ ملف غير موجود'); return; }
+  try {
+    const res = await api('/presentations/' + id);
+    const item = res.data;
+    if (!item) { toast('❌ الملف غير موجود'); return; }
+    document.getElementById('presentation-title').textContent = item.title || 'عرض تقديمي';
+    document.getElementById('back-to-course').href = 'course.html?id=' + item.unitId;
+    const frame = document.getElementById('presentation-frame');
+    const link = document.getElementById('open-drive-link');
+    const previewUrl = item.driveFileId
+      ? 'https://drive.google.com/file/d/' + item.driveFileId + '/preview'
+      : item.driveUrl;
+    if (frame) frame.src = previewUrl;
+    if (link) link.href = item.driveUrl || previewUrl;
+  } catch (e) { toast('❌ فشل تحميل العرض التقديمي'); }
+}
+
+// ===== Chat with teacher =====
+let chatPollTimer = null;
+async function loadChatPage() {
+  const user = getUser();
+  const nameEl = document.getElementById('nav-name');
+  if (nameEl) nameEl.textContent = user.name || '—';
+  await refreshChatMessages();
+  if (chatPollTimer) clearInterval(chatPollTimer);
+  chatPollTimer = setInterval(refreshChatMessages, 8000);
+}
+
+async function refreshChatMessages() {
+  const box = document.getElementById('chat-messages');
+  const empty = document.getElementById('chat-empty');
+  if (!box) return;
+  try {
+    const res = await api('/chat/me');
+    const messages = res.data || [];
+    if (!messages.length) {
+      box.innerHTML = '';
+      if (empty) empty.style.display = 'block';
+      return;
+    }
+    if (empty) empty.style.display = 'none';
+    const wasNearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    box.innerHTML = messages.map(m => {
+      const mine = m.senderRole === 'student';
+      return `
+        <div style="align-self:${mine ? 'flex-start' : 'flex-end'}; max-width:75%;">
+          <div style="background:${mine ? 'var(--bg)' : 'var(--accent)'}; color:${mine ? 'var(--text)' : '#fff'}; padding:10px 14px; border-radius:var(--radius-md); line-height:1.6;">
+            ${escapeHtml(m.text)}
+          </div>
+          <div style="color:var(--text-muted); font-size:0.7rem; margin-top:4px; text-align:${mine ? 'right' : 'left'};">${formatDate(m.createdAt)}</div>
+        </div>
+      `;
+    }).join('');
+    if (wasNearBottom) box.scrollTop = box.scrollHeight;
+  } catch (e) {}
+}
+
+async function sendChatMessage() {
+  const input = document.getElementById('chat-input');
+  const text = input?.value.trim();
+  if (!text) return;
+  input.value = '';
+  try {
+    const res = await api('/chat/me', { method: 'POST', body: JSON.stringify({ text }) });
+    if (!res.ok) toast('❌ ' + (res.error || 'فشل إرسال الرسالة'));
+    await refreshChatMessages();
+    const box = document.getElementById('chat-messages');
+    if (box) box.scrollTop = box.scrollHeight;
+  } catch (e) {}
+}
+
+// ===== small helpers =====
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str == null ? '' : String(str);
+  return div.innerHTML;
+}
+function formatDate(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('ar-EG', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  } catch (e) { return ''; }
+}
+
 // UI Helpers
 function switchTab(tab, id) {
   tab.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -456,6 +651,9 @@ document.addEventListener('DOMContentLoaded', () => {
   if (path.includes('course.html')) loadCourse();
   if (path.includes('exam.html')) loadExam();
   if (path.includes('dashboard.html')) loadDashboard();
+  if (path.includes('video.html')) loadVideoPage();
+  if (path.includes('presentation.html')) loadPresentationPage();
+  if (path.includes('chat.html')) loadChatPage();
 });
 
 window.onclick = e => {
