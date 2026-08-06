@@ -1,3 +1,4 @@
+// ===== MFX Student App =====
 const API = 'https://mrmomd-production.up.railway.app/api';
 
 function toast(msg) {
@@ -101,7 +102,13 @@ async function loadCourse() {
   const id = params.get('id');
   if (!id) { toast('❌ كورس غير موجود'); return; }
   try {
-    const c = await api('/units?courseId=' + id);
+    // These two are independent — fire them together, and reuse the
+    // course-detail response for the units accordion instead of the old
+    // code's second (redundant) call to the same endpoint.
+    const [c] = await Promise.all([
+      api('/units?courseId=' + id),
+      loadCourseExams(id)
+    ]);
     document.getElementById('course-title').textContent = c.title || 'كورس';
     document.getElementById('course-desc').textContent = c.description || '';
     document.getElementById('course-meta').innerHTML = `
@@ -113,72 +120,67 @@ async function loadCourse() {
       ${c.popular ? '<span class="badge badge-warn">🔥 شائع</span>' : ''}
       <span class="badge badge-ok">✓ مسجل</span>
     `;
-    loadUnits(id);
-    loadCourseExams(id);
+    renderUnits(c.units || []);
   } catch (e) { toast('❌ فشل تحميل الكورس'); }
 }
 
-async function loadUnits(courseId) {
+function renderUnits(units) {
   const list = document.getElementById('units-list');
   const empty = document.getElementById('units-empty');
   if (!list) return;
-  try {
-    const data = await api('/units?courseId=' + courseId);
-    list.innerHTML = '';
-    const units = data.units || [];
-    if (!units.length) { if (empty) empty.style.display = 'block'; return; }
-    if (empty) empty.style.display = 'none';
-    units.forEach((u, i) => {
-      const item = document.createElement('div');
-      item.className = 'accordion-item' + (i === 0 ? ' open' : '');
-      item.innerHTML = `
-        <div class="accordion-header" onclick="toggleAcc(this)">
-          <div style="display:flex; align-items:center; gap:12px;">
-            <span style="color:var(--accent);">📁</span>
-            <h4>${u.title}</h4>
-          </div>
-          <div class="meta">
-            <span>${u.videoCount || 0} فيديو</span>
-            <span>${u.examCount || 0} امتحان</span>
-            <span style="transform:${i===0?'rotate(180deg)':'rotate(0deg)'};">▼</span>
-          </div>
+  list.innerHTML = '';
+  if (!units.length) { if (empty) empty.style.display = 'block'; return; }
+  if (empty) empty.style.display = 'none';
+  units.forEach((u, i) => {
+    const item = document.createElement('div');
+    item.className = 'accordion-item' + (i === 0 ? ' open' : '');
+    item.innerHTML = `
+      <div class="accordion-header" onclick="toggleAcc(this)">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <span style="color:var(--accent);">📁</span>
+          <h4>${u.title}</h4>
         </div>
-        <div class="accordion-content">
-          <div style="display:flex; flex-direction:column; gap:8px;">
-            ${(u.videos || []).map(v => `
-              <a href="video.html?id=${v.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
-                <div style="display:flex; align-items:center; gap:10px;">
-                  <span>▶️</span>
-                  <span>${v.title}</span>
-                  ${v.watched ? '<span class="badge badge-ok">✓ شُاهد</span>' : ''}
-                </div>
-                <span style="color:var(--text-muted); font-size:0.85rem;">${v.duration || ''}</span>
-              </a>
-            `).join('')}
-            ${(u.presentations || []).map(p => `
-              <a href="presentation.html?id=${p.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
-                <div style="display:flex; align-items:center; gap:10px;">
-                  <span>📊</span>
-                  <span>${p.title}</span>
-                </div>
-                <span style="color:var(--text-muted); font-size:0.85rem;">${p.slideCount ? p.slideCount + ' شريحة' : 'بوربوينت'}</span>
-              </a>
-            `).join('')}
-            ${(u.exams || []).map(ex => `
-              <div style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md);">
-                <div style="display:flex; align-items:center; gap:10px;">
-                  <span>📝</span>
-                  <span>${ex.title}</span>
-                </div>
-                <a href="exam.html?id=${ex.id}" class="btn btn-primary btn-sm">بدء</a>
+        <div class="meta">
+          <span>${u.videoCount || 0} فيديو</span>
+          <span>${u.examCount || 0} امتحان</span>
+          <span style="transform:${i===0?'rotate(180deg)':'rotate(0deg)'};">▼</span>
+        </div>
+      </div>
+      <div class="accordion-content">
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          ${(u.videos || []).map(v => `
+            <a href="video.html?id=${v.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span>▶️</span>
+                <span>${v.title}</span>
+                ${v.watched ? '<span class="badge badge-ok">✓ شُاهد</span>' : ''}
               </div>
-            `).join('')}
-          </div>
+              <span style="color:var(--text-muted); font-size:0.85rem;">${v.duration || ''}</span>
+            </a>
+          `).join('')}
+          ${(u.presentations || []).map(p => `
+            <a href="presentation.html?id=${p.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span>📊</span>
+                <span>${p.title}</span>
+              </div>
+              <span style="color:var(--text-muted); font-size:0.85rem;">${p.slideCount ? p.slideCount + ' شريحة' : 'بوربوينت'}</span>
+            </a>
+          `).join('')}
+          ${(u.exams || []).map(ex => `
+            <div style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md);">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span>📝</span>
+                <span>${ex.title}</span>
+              </div>
+              <a href="exam.html?id=${ex.id}" class="btn btn-primary btn-sm">بدء</a>
+            </div>
+          `).join('')}
         </div>
-      `;
-      list.appendChild(item);
-    });
-  } catch (e) { list.innerHTML = ''; if (empty) empty.style.display = 'block'; }
+      </div>
+    `;
+    list.appendChild(item);
+  });
 }
 
 async function loadCourseExams(courseId) {
