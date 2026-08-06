@@ -1,4 +1,3 @@
-// ===== MFX Student App =====
 const API = 'https://mrmomd-production.up.railway.app/api';
 
 function toast(msg) {
@@ -221,14 +220,17 @@ async function loadExam() {
   const id = params.get('id');
   if (!id) { toast('❌ امتحان غير موجود'); return; }
   try {
-    const data = await api('/exams/' + id);
+    const res = await api('/exams/' + id);
+    const data = (res && res.data) || {};
     examState.questions = data.questions || [];
     examState.startTime = Date.now();
     document.getElementById('exam-badge').textContent = data.title || 'امتحان';
-    document.getElementById('exam-title').textContent = data.subtitle || '';
-    document.getElementById('exam-meta').textContent = `${examState.questions.length} سؤال | ${data.duration || 0} دقيقة`;
+    document.getElementById('exam-title').textContent = data.description || '';
+    const minutes = parseInt(data.timerMinutes, 10) || 0;
+    document.getElementById('exam-meta').textContent = `${examState.questions.length} سؤال` + (minutes ? ` | ${minutes} دقيقة` : '');
     renderExam();
-    startTimer(data.duration || 30);
+    if (minutes > 0) startTimer(minutes);
+    else { const t = document.getElementById('timer'); if (t) t.textContent = '∞'; }
   } catch (e) { toast('❌ فشل تحميل الامتحان'); }
 }
 
@@ -241,18 +243,60 @@ function renderExam() {
     <div class="q-card" data-idx="${i}" style="display:${i===0?'block':'none'}">
       <span class="q-num">السؤال ${i+1}</span>
       <p class="q-text">${q.text}</p>
-      <div class="opts">
-        ${(q.options || []).map((opt, j) => `
-          <label class="opt ${examState.answers[i] === j ? 'sel' : ''}" onclick="pickOpt(${i}, ${j})">
-            <input type="radio" name="q${i}" value="${j}" ${examState.answers[i] === j ? 'checked' : ''}>
-            <span>${opt}</span>
-          </label>
-        `).join('')}
-      </div>
+      <div class="opts">${renderQuestionInput(q)}</div>
     </div>
   `).join('');
   updateProg();
   renderQNav();
+}
+
+function renderQuestionInput(q) {
+  const current = examState.answers[q.id];
+  if (q.type === 'mcq') {
+    return (q.options || []).map((opt) => `
+      <label class="opt ${current === opt ? 'sel' : ''}" onclick="pickOpt('${q.id}', ${JSON.stringify(opt)})">
+        <input type="radio" name="q${q.id}" ${current === opt ? 'checked' : ''}>
+        <span>${opt}</span>
+      </label>`).join('');
+  }
+  if (q.type === 'truefalse') {
+    return ['true', 'false'].map((v) => `
+      <label class="opt ${String(current) === v ? 'sel' : ''}" onclick="pickOpt('${q.id}', ${v})">
+        <input type="radio" name="q${q.id}" ${String(current) === v ? 'checked' : ''}>
+        <span>${v === 'true' ? 'صح' : 'غلط'}</span>
+      </label>`).join('');
+  }
+  if (q.type === 'multi') {
+    const selected = Array.isArray(current) ? current : [];
+    return (q.options || []).map((opt) => `
+      <label class="opt ${selected.includes(opt) ? 'sel' : ''}" onclick="toggleMultiOpt('${q.id}', ${JSON.stringify(opt)})">
+        <input type="checkbox" ${selected.includes(opt) ? 'checked' : ''}>
+        <span>${opt}</span>
+      </label>`).join('');
+  }
+  if (q.type === 'fillblank') {
+    return `<input type="text" class="inp" value="${current || ''}" oninput="setTextAnswer('${q.id}', this.value)" placeholder="اكتب إجابتك">`;
+  }
+  // essay
+  return `<textarea class="inp" rows="4" oninput="setTextAnswer('${q.id}', this.value)" placeholder="اكتب إجابتك">${current || ''}</textarea>`;
+}
+
+function pickOpt(qId, value) {
+  examState.answers[qId] = value;
+  renderExam();
+  goQ(examState.current);
+}
+function toggleMultiOpt(qId, value) {
+  const arr = Array.isArray(examState.answers[qId]) ? examState.answers[qId] : [];
+  const idx = arr.indexOf(value);
+  if (idx === -1) arr.push(value); else arr.splice(idx, 1);
+  examState.answers[qId] = arr;
+  renderExam();
+  goQ(examState.current);
+}
+function setTextAnswer(qId, value) {
+  examState.answers[qId] = value;
+  updateProg();
 }
 
 function renderQNav() {
@@ -273,22 +317,16 @@ function renderQNav() {
   document.getElementById('submit-btn').disabled = false;
 }
 
-function pickOpt(qIdx, optIdx) {
-  examState.answers[qIdx] = optIdx;
-  const card = document.querySelector(`.q-card[data-idx="${qIdx}"]`);
-  if (card) {
-    card.querySelectorAll('.opt').forEach((o, i) => o.classList.toggle('sel', i === optIdx));
-  }
-  updateProg();
-}
-
 function goQ(n) { examState.current = n; document.querySelectorAll('.q-card').forEach((c, i) => c.style.display = i === n ? 'block' : 'none'); renderQNav(); }
 function nextQ() { if (examState.current < examState.questions.length - 1) goQ(examState.current + 1); }
 function prevQ() { if (examState.current > 0) goQ(examState.current - 1); }
 
 function updateProg() {
   const total = examState.questions.length;
-  const ans = Object.keys(examState.answers).length;
+  const ans = Object.keys(examState.answers).filter(k => {
+    const v = examState.answers[k];
+    return v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0);
+  }).length;
   const fill = document.getElementById('progress-fill');
   const txt = document.getElementById('progress-text');
   if (fill) fill.style.width = total ? (ans / total * 100) + '%' : '0%';
