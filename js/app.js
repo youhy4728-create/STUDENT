@@ -17,6 +17,19 @@ function setToken(t) { localStorage.setItem('mfx_student_token', t); }
 function getUser() { try { return JSON.parse(localStorage.getItem('mfx_student_user') || '{}'); } catch(e) { return {}; } }
 function logout() { localStorage.removeItem('mfx_student_token'); localStorage.removeItem('mfx_student_user'); location.href = 'login.html'; }
 
+// Reads the JWT's own expiry (exp claim) without a network call, so an
+// expired session is caught the instant the page loads instead of only
+// after some data request fails with 401.
+function isTokenExpired(token) {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    if (!payload.exp) return false;
+    return Date.now() >= payload.exp * 1000;
+  } catch (e) {
+    return true; // unreadable token = treat as expired
+  }
+}
+
 async function api(path, opts = {}) {
   const url = API + path;
   const headers = { 'Content-Type': 'application/json' };
@@ -31,8 +44,11 @@ async function api(path, opts = {}) {
 
 // Auth check
 function requireAuth() {
-  if (!getToken() && !location.pathname.includes('login.html')) {
-    location.href = 'login.html';
+  const onLoginPage = location.pathname.includes('login.html');
+  const token = getToken();
+  if (onLoginPage) return;
+  if (!token || isTokenExpired(token)) {
+    logout();
   }
 }
 
@@ -79,8 +95,8 @@ async function loadMyCourses() {
         <div class="card-img">${c.icon || '📚'}</div>
         <div class="card-body">
           <span class="card-tag">${c.tag || 'كورس'}</span>
-          <h3>${c.title}</h3>
-          <p>${c.description || ''}</p>
+          <h3>${escapeHtml(c.title)}</h3>
+          <p>${escapeHtml(c.description || '')}</p>
           <div style="margin:12px 0;">
             <div style="display:flex; justify-content:space-between; margin-bottom:6px; font-size:0.85rem;">
               <span style="color:var(--text-secondary);">التقدم</span>
@@ -138,7 +154,7 @@ function renderUnits(units) {
       <div class="accordion-header" onclick="toggleAcc(this)">
         <div style="display:flex; align-items:center; gap:12px;">
           <span style="color:var(--accent);">📁</span>
-          <h4>${u.title}</h4>
+          <h4>${escapeHtml(u.title)}</h4>
         </div>
         <div class="meta">
           <span>${u.videoCount || 0} فيديو</span>
@@ -152,7 +168,7 @@ function renderUnits(units) {
             <a href="video.html?id=${v.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
               <div style="display:flex; align-items:center; gap:10px;">
                 <span>▶️</span>
-                <span>${v.title}</span>
+                <span>${escapeHtml(v.title)}</span>
                 ${v.watched ? '<span class="badge badge-ok">✓ شُاهد</span>' : ''}
               </div>
               <span style="color:var(--text-muted); font-size:0.85rem;">${v.duration || ''}</span>
@@ -162,7 +178,7 @@ function renderUnits(units) {
             <a href="presentation.html?id=${p.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
               <div style="display:flex; align-items:center; gap:10px;">
                 <span>📊</span>
-                <span>${p.title}</span>
+                <span>${escapeHtml(p.title)}</span>
               </div>
               <span style="color:var(--text-muted); font-size:0.85rem;">${p.slideCount ? p.slideCount + ' شريحة' : 'بوربوينت'}</span>
             </a>
@@ -171,7 +187,7 @@ function renderUnits(units) {
             <div style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md);">
               <div style="display:flex; align-items:center; gap:10px;">
                 <span>📝</span>
-                <span>${ex.title}</span>
+                <span>${escapeHtml(ex.title)}</span>
               </div>
               <a href="exam.html?id=${ex.id}" class="btn btn-primary btn-sm">بدء</a>
             </div>
@@ -199,7 +215,7 @@ async function loadCourseExams(courseId) {
       div.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px;">
           <div>
-            <h3 style="margin-bottom:6px;">${ex.title}</h3>
+            <h3 style="margin-bottom:6px;">${escapeHtml(ex.title)}</h3>
             <p style="color:var(--text-secondary); font-size:0.9rem;">${ex.questionCount || 0} سؤال | ${ex.duration || 0} دقيقة</p>
           </div>
           ${ex.completed ? '<span class="badge badge-ok">✓ تم</span>' : '<span class="badge badge-info">جديد</span>'}
@@ -244,7 +260,7 @@ function renderExam() {
   container.innerHTML = examState.questions.map((q, i) => `
     <div class="q-card" data-idx="${i}" style="display:${i===0?'block':'none'}">
       <span class="q-num">السؤال ${i+1}</span>
-      <p class="q-text">${q.text}</p>
+      <p class="q-text">${escapeHtml(q.text)}</p>
       <div class="opts">${renderQuestionInput(q)}</div>
     </div>
   `).join('');
@@ -442,7 +458,7 @@ async function loadDashboard() {
           div.style.cssText = 'background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-md); padding:16px 20px; display:flex; justify-content:space-between; align-items:center;';
           div.innerHTML = `
             <div>
-              <div style="font-weight:600;">${ex.title}</div>
+              <div style="font-weight:600;">${escapeHtml(ex.title)}</div>
               <div style="color:var(--text-muted); font-size:0.85rem; margin-top:2px;">${ex.date || ''}</div>
             </div>
             <span class="badge ${ex.score >= 50 ? 'badge-ok' : 'badge-err'}">${ex.score}%</span>
@@ -467,7 +483,7 @@ async function loadDashboard() {
           div.innerHTML = `
             <div class="leaderboard-rank ${rankClass}">${i + 1}</div>
             <div style="flex:1;">
-              <div style="font-weight:600;">${s.name}</div>
+              <div style="font-weight:600;">${escapeHtml(s.name)}</div>
               <div style="color:var(--text-muted); font-size:0.85rem;">${s.examsCount} امتحان</div>
             </div>
             <div style="font-weight:700; color:var(--accent-light);">${s.avgScore}%</div>
@@ -694,6 +710,16 @@ document.addEventListener('DOMContentLoaded', () => {
   if (path.includes('video.html')) loadVideoPage();
   if (path.includes('presentation.html')) loadPresentationPage();
   if (path.includes('chat.html')) loadChatPage();
+});
+
+// When the browser restores a page from its back/forward cache (e.g. the
+// student hits the back button), it shows the old DOM as-is without
+// re-running any of the code above — including the login check. That's
+// what made an expired/logged-out session look like it was still showing
+// "the old page". Forcing a fresh load re-runs requireAuth() and re-fetches
+// real data instead.
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) location.reload();
 });
 
 window.onclick = e => {
