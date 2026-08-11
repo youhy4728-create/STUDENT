@@ -57,12 +57,14 @@ async function handleLogin(e) {
   e.preventDefault();
   const code = document.getElementById('login-code')?.value.trim();
   const name = document.getElementById('login-name')?.value.trim();
-  if (!code || !name) { toast('❌ أدخل الكود والاسم'); return; }
+  const phone = document.getElementById('login-phone')?.value.trim();
+  const guardianPhone = document.getElementById('login-guardian-phone')?.value.trim();
+  if (!code || !name || !phone || !guardianPhone) { toast('❌ أدخل الكود والاسم ورقم تليفونك ورقم تليفون ولي الأمر'); return; }
   toast('⏳ جاري التحقق...');
   try {
     const data = await api('/auth/student-login', {
       method: 'POST',
-      body: JSON.stringify({ code, name })
+      body: JSON.stringify({ code, name, phone, guardianPhone })
     });
     if (data.token) {
       setToken(data.token);
@@ -604,13 +606,74 @@ async function loadPresentationPage() {
     document.getElementById('presentation-title').textContent = item.title || 'عرض تقديمي';
     document.getElementById('back-to-course').href = 'course.html?id=' + item.unitId;
     const frame = document.getElementById('presentation-frame');
-    const link = document.getElementById('open-drive-link');
     const previewUrl = item.driveFileId
       ? 'https://drive.google.com/file/d/' + item.driveFileId + '/preview'
       : item.driveUrl;
     if (frame) frame.src = previewUrl;
-    if (link) link.href = item.driveUrl || previewUrl;
+    renderPresentationWatermark();
+    setupPresentationDeterrents();
   } catch (e) { toast('❌ فشل تحميل العرض التقديمي'); }
+}
+
+// Tiles the student's name + code across the presentation area so any
+// screenshot or photo of the screen is traceable back to them. This is a
+// deterrent, not a real block — nothing on the web can stop someone from
+// literally photographing their own screen.
+function renderPresentationWatermark() {
+  const layer = document.getElementById('presentation-watermark');
+  if (!layer) return;
+  const user = getUser();
+  const label = `${user.name || ''} · ${user.code || ''}`;
+  let html = '';
+  for (let row = 0; row < 6; row++) {
+    html += `<div style="position:absolute; top:${row * 18}%; left:${(row % 2) * -8}%; width:130%; display:flex; gap:60px; opacity:0.16; transform:rotate(-18deg); white-space:nowrap; font-size:0.8rem; color:#fff;">`;
+    for (let col = 0; col < 6; col++) html += `<span>${escapeHtml(label)}</span>`;
+    html += '</div>';
+  }
+  layer.innerHTML = html;
+}
+
+// A handful of low-friction deterrents against the *casual* "right click,
+// save" or "select all, copy" path. None of this stops a determined
+// person with a phone camera or a screen recorder — that's simply not
+// something any website can prevent.
+function setupPresentationDeterrents() {
+  const viewer = document.getElementById('presentation-viewer');
+  if (!viewer) return;
+
+  viewer.addEventListener('contextmenu', (e) => e.preventDefault());
+  viewer.addEventListener('dragstart', (e) => e.preventDefault());
+  viewer.style.userSelect = 'none';
+
+  const cover = document.getElementById('presentation-blur-cover');
+  const blurNow = () => { if (cover) cover.style.display = 'flex'; };
+  const unblurNow = () => { if (cover) cover.style.display = 'none'; };
+
+  // Hide the content the moment the tab loses focus or is backgrounded —
+  // makes casual screen-recording apps (which usually need the tab
+  // visible/focused) capture a blurred cover instead of the real slides.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) blurNow(); else unblurNow();
+  });
+  window.addEventListener('blur', blurNow);
+  window.addEventListener('focus', unblurNow);
+
+  // Block the most common keyboard shortcuts someone would reach for
+  // first (Print, Save, DevTools). Anyone who actually knows what
+  // they're doing can still get around this — it just raises the floor
+  // above "accidentally easy".
+  document.addEventListener('keydown', (e) => {
+    const key = e.key.toLowerCase();
+    const blocked =
+      key === 'printscreen' ||
+      (e.ctrlKey && (key === 'p' || key === 's' || key === 'u')) ||
+      key === 'f12' ||
+      (e.ctrlKey && e.shiftKey && (key === 'i' || key === 'c' || key === 'j'));
+    if (blocked) {
+      e.preventDefault();
+      toast('❌ العرض ده محمي');
+    }
+  });
 }
 
 // ===== Chat with teacher =====
@@ -702,7 +765,14 @@ function toggleAcc(header) {
 document.addEventListener('DOMContentLoaded', () => {
   requireAuth();
   const path = location.pathname;
-  if (path.includes('login.html')) return;
+  if (path.includes('login.html')) {
+    // Pre-fill the code when a student arrives via a QR-code deep link
+    // (login.html?code=XXXX) instead of typing it in by hand.
+    const qrCode = new URLSearchParams(location.search).get('code');
+    const codeInput = document.getElementById('login-code');
+    if (qrCode && codeInput) codeInput.value = qrCode;
+    return;
+  }
   if (path.includes('index.html')) loadMyCourses();
   if (path.includes('course.html')) loadCourse();
   if (path.includes('exam.html')) loadExam();
