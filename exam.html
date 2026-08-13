@@ -33,6 +33,7 @@
         <span id="progress-text">0 / 0</span>
       </div>
       <div class="prog"><div class="prog-fill" id="progress-fill" style="width:0%;"></div></div>
+      <div class="autosave-status" id="autosave-status"></div>
     </div>
 
     <div id="questions-container">
@@ -71,12 +72,13 @@
   <!-- Result Modal -->
   <div id="result-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:9999; align-items:center; justify-content:center;">
     <div class="glass" style="border-radius:var(--radius-xl); padding:48px; max-width:480px; text-align:center; width:90%;">
-      <div style="font-size:4rem; margin-bottom:16px;">🎉</div>
-      <h2 style="margin-bottom:8px;">تم تسليم الامتحان!</h2>
+      <div style="font-size:4rem; margin-bottom:16px;" id="result-icon">🎉</div>
+      <h2 style="margin-bottom:8px;" id="result-title">تم تسليم الامتحان!</h2>
       <div style="font-size:3rem; font-weight:800; margin:20px 0;" class="text-gradient" id="result-score">0%</div>
       <p style="color:var(--text-secondary); margin-bottom:8px;" id="result-rank">ترتيبك: —</p>
       <p style="color:var(--text-secondary); margin-bottom:24px;" id="result-time">الوقت: —</p>
-      <a href="dashboard.html" class="btn btn-primary" style="width:100%;">الذهاب للوحة التحكم</a>
+      <button type="button" class="btn btn-secondary" id="result-retry-btn" style="width:100%; margin-bottom:8px; display:none;" onclick="retrySubmit_()">إعادة المحاولة</button>
+      <a href="dashboard.html" class="btn btn-primary" style="width:100%;" id="result-dashboard-link">الذهاب للوحة التحكم</a>
     </div>
   </div>
 

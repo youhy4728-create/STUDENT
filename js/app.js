@@ -12,6 +12,55 @@ function toast(msg) {
   setTimeout(() => { t.classList.remove('on'); setTimeout(() => t.remove(), 400); }, 3000);
 }
 
+// ===== Global loading / anti-duplicate-click helpers =====
+// Every important action (login, start exam, save, submit) routes through
+// withButtonLock so a double-click / double-tap can only ever fire ONE
+// request: the button is disabled + shows a spinner immediately, and any
+// extra clicks while it's busy are ignored until the request settles.
+const activeLocks = new Set();
+async function withButtonLock(btn, busyText, fn) {
+  if (!btn || btn.dataset.locked === '1') return; // already running — ignore the extra click
+  const original = btn.innerHTML;
+  btn.dataset.locked = '1';
+  btn.disabled = true;
+  btn.classList.add('is-loading');
+  if (busyText) btn.innerHTML = busyText + '<span class="mfx-spinner"></span>';
+  try {
+    return await fn();
+  } finally {
+    btn.dataset.locked = '0';
+    btn.disabled = false;
+    btn.classList.remove('is-loading');
+    btn.innerHTML = original;
+  }
+}
+
+// Full-page loader: shown the instant a data page starts loading (so the
+// student sees a spinning circle instead of a blank page while the first
+// Sheets read comes back), removed as soon as that page's load function
+// finishes — success or failure, it's always removed via .finally().
+function showPageLoader() {
+  if (document.querySelector('.mfx-page-loader')) return;
+  const el = document.createElement('div');
+  el.className = 'mfx-page-loader';
+  el.innerHTML = '<div class="mfx-page-loader-ring"></div>';
+  document.body.appendChild(el);
+}
+function hidePageLoader() {
+  const el = document.querySelector('.mfx-page-loader');
+  if (!el) return;
+  el.classList.add('is-hiding');
+  setTimeout(() => el.remove(), 200);
+}
+async function withPageLoader(fn) {
+  showPageLoader();
+  try {
+    return await fn();
+  } finally {
+    hidePageLoader();
+  }
+}
+
 function getToken() { return localStorage.getItem('mfx_student_token'); }
 function setToken(t) { localStorage.setItem('mfx_student_token', t); }
 function getUser() { try { return JSON.parse(localStorage.getItem('mfx_student_user') || '{}'); } catch(e) { return {}; } }
@@ -55,26 +104,34 @@ function requireAuth() {
 // Login
 async function handleLogin(e) {
   e.preventDefault();
+  const form = document.getElementById('login-form');
+  const btn = document.getElementById('login-submit-btn');
   const code = document.getElementById('login-code')?.value.trim();
   const name = document.getElementById('login-name')?.value.trim();
   const phone = document.getElementById('login-phone')?.value.trim();
   const guardianPhone = document.getElementById('login-guardian-phone')?.value.trim();
   if (!code || !name || !phone || !guardianPhone) { toast('❌ أدخل الكود والاسم ورقم تليفونك ورقم تليفون ولي الأمر'); return; }
-  toast('⏳ جاري التحقق...');
-  try {
-    const data = await api('/auth/student-login', {
-      method: 'POST',
-      body: JSON.stringify({ code, name, phone, guardianPhone })
-    });
-    if (data.token) {
-      setToken(data.token);
-      localStorage.setItem('mfx_student_user', JSON.stringify(data.user));
-      toast('✅ تم تسجيل الدخول');
-      setTimeout(() => location.href = 'index.html', 800);
-    } else {
-      toast('❌ ' + (data.error || 'كود أو اسم غير صحيح'));
+
+  await withButtonLock(btn, 'جاري تسجيل الدخول...', async () => {
+    if (form) form.querySelectorAll('input').forEach((i) => i.disabled = true);
+    try {
+      const data = await api('/auth/student-login', {
+        method: 'POST',
+        body: JSON.stringify({ code, name, phone, guardianPhone })
+      });
+      if (data && data.token) {
+        setToken(data.token);
+        localStorage.setItem('mfx_student_user', JSON.stringify(data.user));
+        toast('✅ تم تسجيل الدخول');
+        location.href = 'index.html'; // single navigation — no repeated reloads
+      } else {
+        toast('❌ ' + ((data && data.error) || 'كود أو اسم غير صحيح'));
+        if (form) form.querySelectorAll('input').forEach((i) => i.disabled = false);
+      }
+    } catch (err) {
+      if (form) form.querySelectorAll('input').forEach((i) => i.disabled = false);
     }
-  } catch (e) {}
+  });
 }
 
 // Load my courses
@@ -233,25 +290,90 @@ async function loadCourseExams(courseId) {
 }
 
 // Exam
-let examState = { questions: [], current: 0, answers: {}, startTime: null };
+// examState.attemptId / expiresAt come from the server (POST /attempts/start)
+// — the server's clock is the only source of truth for when time is up.
+// examState.answers is mirrored into localStorage on every change so a
+// refresh (or the browser dying) never loses an answer that hasn't made it
+// to the server yet.
+let examState = { examId: null, attemptId: null, questions: [], current: 0, answers: {}, expiresAt: null };
+let dirtyAnswerKeys = new Set(); // which question IDs changed since the last autosave
+
+function answersStorageKey_() { return 'mfx_exam_answers_' + examState.attemptId; }
+function saveAnswersLocally_() {
+  if (!examState.attemptId) return;
+  try { localStorage.setItem(answersStorageKey_(), JSON.stringify(examState.answers)); } catch (e) {}
+}
+function loadAnswersLocally_() {
+  try {
+    const raw = localStorage.getItem(answersStorageKey_());
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) { return {}; }
+}
+function clearAnswersLocally_() {
+  try { localStorage.removeItem(answersStorageKey_()); } catch (e) {}
+}
 
 async function loadExam() {
   const params = new URLSearchParams(location.search);
   const id = params.get('id');
   if (!id) { toast('❌ امتحان غير موجود'); return; }
+  examState.examId = id;
+  setExamLoading_(true, 'جاري تحميل الامتحان...');
   try {
-    const res = await api('/exams/' + id);
-    const data = (res && res.data) || {};
+    // ONE request: /attempts/start returns the attempt AND the exam's
+    // metadata + questions together (previously this was two separate
+    // requests — start, then a second GET /exams/:id). Idempotent and
+    // deduped server-side, so a double-tap or a page reload never creates
+    // a second attempt.
+    const startRes = await api('/attempts/start', { method: 'POST', body: JSON.stringify({ examId: id }) });
+    if (!startRes || !startRes.ok) {
+      const container = document.getElementById('questions-container');
+      if (container) container.innerHTML = `<div style="text-align:center; padding:40px 0; color:var(--text-secondary);">❌ ${escapeHtml((startRes && startRes.error) || 'تعذر بدء الامتحان')}</div>`;
+      toast('❌ ' + ((startRes && startRes.error) || 'تعذر بدء الامتحان'));
+      return;
+    }
+    const attempt = startRes.data;
+    examState.attemptId = attempt.id;
+    examState.expiresAt = attempt.expiresAt ? new Date(attempt.expiresAt).getTime() : null;
+    const data = attempt.exam ? { ...attempt.exam, questions: attempt.questions } : {};
     examState.questions = data.questions || [];
-    examState.startTime = Date.now();
+
+    // Resume any answers already saved on the server for this attempt,
+    // then let localStorage fill in anything saved locally that a slow
+    // network hadn't autosaved yet (local always wins — it's newer).
+    const serverAnswers = safeParseAnswers_(attempt.answers);
+    const localAnswers = loadAnswersLocally_();
+    examState.answers = { ...serverAnswers, ...localAnswers };
+
     document.getElementById('exam-badge').textContent = data.title || 'امتحان';
     document.getElementById('exam-title').textContent = data.description || '';
     const minutes = parseInt(data.timerMinutes, 10) || 0;
     document.getElementById('exam-meta').textContent = `${examState.questions.length} سؤال` + (minutes ? ` | ${minutes} دقيقة` : '');
+    setExamLoading_(false);
     renderExam();
-    if (minutes > 0) startTimer(minutes);
+    if (examState.expiresAt) startTimer();
     else { const t = document.getElementById('timer'); if (t) t.textContent = '∞'; }
-  } catch (e) { toast('❌ فشل تحميل الامتحان'); }
+    startAutosaveLoop();
+  } catch (e) {
+    setExamLoading_(false);
+    toast('❌ فشل تحميل الامتحان');
+  }
+}
+
+function safeParseAnswers_(raw) {
+  if (!raw) return {};
+  try { const v = JSON.parse(raw); return v && typeof v === 'object' ? v : {}; } catch (e) { return {}; }
+}
+
+function setExamLoading_(isLoading, text) {
+  const container = document.getElementById('questions-container');
+  if (!container) return;
+  if (isLoading) {
+    container.innerHTML = `<div style="text-align:center; padding:60px 0; color:var(--text-secondary);">
+      <span class="mfx-spinner" style="width:28px; height:28px;"></span>
+      <p style="margin-top:12px;">${escapeHtml(text || 'جاري التحميل...')}</p>
+    </div>`;
+  }
 }
 
 function renderExam() {
@@ -260,10 +382,11 @@ function renderExam() {
   if (!examState.questions.length) { container.innerHTML = ''; if (empty) empty.style.display = 'block'; return; }
   if (empty) empty.style.display = 'none';
   container.innerHTML = examState.questions.map((q, i) => `
-    <div class="q-card" data-idx="${i}" style="display:${i===0?'block':'none'}">
+    <div class="q-card" data-idx="${i}" data-qid="${q.id}" style="display:${i===0?'block':'none'}">
       <span class="q-num">السؤال ${i+1}</span>
       <p class="q-text">${escapeHtml(q.text)}</p>
-      <div class="opts">${renderQuestionInput(q)}</div>
+      ${q.type === 'listening' && q.audioUrl ? `<audio class="q-audio" controls preload="none" src="${escapeAttr_(q.audioUrl)}">متصفحك لا يدعم الصوت</audio>` : ''}
+      <div class="opts" data-qid="${q.id}">${renderQuestionInput(q)}</div>
     </div>
   `).join('');
   updateProg();
@@ -272,11 +395,11 @@ function renderExam() {
 
 function renderQuestionInput(q) {
   const current = examState.answers[q.id];
-  if (q.type === 'mcq') {
+  if (q.type === 'mcq' || q.type === 'listening') {
     return (q.options || []).map((opt) => `
       <label class="opt ${current === opt ? 'sel' : ''}" onclick="pickOpt('${q.id}', ${JSON.stringify(opt)})">
         <input type="radio" name="q${q.id}" ${current === opt ? 'checked' : ''}>
-        <span>${opt}</span>
+        <span>${escapeHtml(opt)}</span>
       </label>`).join('');
   }
   if (q.type === 'truefalse') {
@@ -291,31 +414,41 @@ function renderQuestionInput(q) {
     return (q.options || []).map((opt) => `
       <label class="opt ${selected.includes(opt) ? 'sel' : ''}" onclick="toggleMultiOpt('${q.id}', ${JSON.stringify(opt)})">
         <input type="checkbox" ${selected.includes(opt) ? 'checked' : ''}>
-        <span>${opt}</span>
+        <span>${escapeHtml(opt)}</span>
       </label>`).join('');
   }
   if (q.type === 'fillblank') {
-    return `<input type="text" class="inp" value="${current || ''}" oninput="setTextAnswer('${q.id}', this.value)" placeholder="اكتب إجابتك">`;
+    return `<input type="text" class="inp" value="${escapeAttr_(current || '')}" oninput="setTextAnswer('${q.id}', this.value)" placeholder="اكتب إجابتك">`;
   }
   // essay
-  return `<textarea class="inp" rows="4" oninput="setTextAnswer('${q.id}', this.value)" placeholder="اكتب إجابتك">${current || ''}</textarea>`;
+  return `<textarea class="inp" rows="4" oninput="setTextAnswer('${q.id}', this.value)" placeholder="اكتب إجابتك">${escapeHtml(current || '')}</textarea>`;
 }
 
-function pickOpt(qId, value) {
+// Selecting an option updates just that question's option list in place
+// (not the whole exam) — this is what stops a <audio> listening player
+// from being torn down and restarted every time an answer is picked, and
+// avoids re-rendering all N questions for a single click.
+function updateAnswer_(qId, value) {
   examState.answers[qId] = value;
-  renderExam();
-  goQ(examState.current);
+  dirtyAnswerKeys.add(qId);
+  saveAnswersLocally_();
+  const optsWrap = document.querySelector(`.opts[data-qid="${qId}"]`);
+  const q = examState.questions.find((x) => x.id === qId);
+  if (optsWrap && q) optsWrap.innerHTML = renderQuestionInput(q);
+  updateProg();
 }
+
+function pickOpt(qId, value) { updateAnswer_(qId, value); }
 function toggleMultiOpt(qId, value) {
-  const arr = Array.isArray(examState.answers[qId]) ? examState.answers[qId] : [];
+  const arr = Array.isArray(examState.answers[qId]) ? [...examState.answers[qId]] : [];
   const idx = arr.indexOf(value);
   if (idx === -1) arr.push(value); else arr.splice(idx, 1);
-  examState.answers[qId] = arr;
-  renderExam();
-  goQ(examState.current);
+  updateAnswer_(qId, arr);
 }
 function setTextAnswer(qId, value) {
   examState.answers[qId] = value;
+  dirtyAnswerKeys.add(qId);
+  saveAnswersLocally_();
   updateProg();
 }
 
@@ -353,17 +486,56 @@ function updateProg() {
   if (txt) txt.textContent = ans + ' / ' + total;
 }
 
+// ===== Autosave =====
+// Batches every answer changed since the last save into ONE request,
+// on a fixed interval — never one request per click. Skips the request
+// entirely if nothing changed since the last tick.
+let autosaveInt;
+function startAutosaveLoop() {
+  clearInterval(autosaveInt);
+  autosaveInt = setInterval(runAutosave, 10000);
+  window.addEventListener('beforeunload', runAutosave);
+}
+async function runAutosave() {
+  if (!examState.attemptId || dirtyAnswerKeys.size === 0) return;
+  const keysToSave = [...dirtyAnswerKeys];
+  dirtyAnswerKeys.clear();
+  const batch = {};
+  keysToSave.forEach((k) => { batch[k] = examState.answers[k]; });
+  const status = document.getElementById('autosave-status');
+  if (status) status.textContent = 'جاري الحفظ...';
+  try {
+    const res = await api('/attempts/' + examState.attemptId + '/answers', {
+      method: 'POST',
+      body: JSON.stringify({ answers: batch })
+    });
+    if (status) status.textContent = (res && res.ok) ? '✓ تم الحفظ' : '';
+  } catch (e) {
+    // Failed silently — the keys are still in examState/localStorage,
+    // so re-add them to be retried on the next tick instead of losing them.
+    keysToSave.forEach((k) => dirtyAnswerKeys.add(k));
+    if (status) status.textContent = '';
+  }
+}
+
+// ===== Server-anchored countdown =====
+// The countdown always recomputes from examState.expiresAt (a server
+// timestamp), never from a locally-ticked "minutes left" counter — so a
+// slow tab, a laptop sleeping, or clock drift can't desync the timer from
+// what the server will actually enforce.
 let timerInt;
-function startTimer(minutes) {
-  let sec = minutes * 60;
+function startTimer() {
+  clearInterval(timerInt);
   const el = document.getElementById('timer');
-  timerInt = setInterval(() => {
-    sec--;
+  const tick = () => {
+    const sec = Math.max(0, Math.round((examState.expiresAt - Date.now()) / 1000));
     const m = Math.floor(sec / 60).toString().padStart(2, '0');
     const s = (sec % 60).toString().padStart(2, '0');
     if (el) el.textContent = m + ':' + s;
     if (sec <= 0) { clearInterval(timerInt); confirmSubmit(); }
-  }, 1000);
+  };
+  tick();
+  timerInt = setInterval(tick, 1000);
 }
 
 function submitExam() {
@@ -377,31 +549,155 @@ function submitExam() {
 
 function closeModal() { document.getElementById('submit-modal').style.display = 'none'; }
 
+// Submit now returns immediately (202 PROCESSING) — the actual Sheets
+// write happens in a batch on the server. We show the "received" state
+// right away, then poll /:id/status with growing intervals (2s, 4s, 8s,
+// then staying at 8s) until it settles, instead of holding one long HTTP
+// connection open or hammering the server every second.
 async function confirmSubmit() {
   closeModal();
   clearInterval(timerInt);
-  toast('⏳ جاري التصحيح...');
+  clearInterval(autosaveInt);
+  const confirmBtn = document.querySelector('#submit-modal .btn-primary');
+  toast('⏳ جاري تسليم الامتحان...');
+  await withButtonLock(confirmBtn, 'جاري التسليم...', async () => {
+    try {
+      const data = await api('/attempts/' + examState.attemptId + '/submit', {
+        method: 'POST',
+        body: JSON.stringify({ answers: examState.answers })
+      });
+      if (!data || !data.ok) {
+        toast('❌ ' + ((data && data.error) || 'فشل تسليم الامتحان'));
+        return;
+      }
+      clearAnswersLocally_();
+      showSubmissionReceived_();
+
+      if (data.data && data.data.status === 'COMPLETED') {
+        // Already flushed (e.g. queue was empty and flushed instantly) —
+        // no need to poll at all.
+        showResult(data.data);
+        return;
+      }
+      pollSubmissionStatus_(examState.attemptId);
+    } catch (e) {}
+  });
+}
+
+// Step 1 of the two-step message from the spec: confirm receipt instantly,
+// independently of whether Sheets has actually been written to yet. Shows
+// a real animated spinner (not emoji) while the queue processes this.
+function showSubmissionReceived_() {
+  const modal = document.getElementById('result-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  setResultModalState_({
+    icon: '<span class="mfx-spinner" style="width:36px; height:36px; border-width:4px;"></span>',
+    title: '✓ تم استلام إجاباتك',
+    score: '', rank: 'جاري حفظ الامتحان...', time: '',
+    showRetry: false
+  });
+}
+
+function setResultModalState_({ icon, title, score, rank, time, showRetry }) {
+  const iconEl = document.getElementById('result-icon');
+  const titleEl = document.getElementById('result-title');
+  const scoreEl = document.getElementById('result-score');
+  const rankEl = document.getElementById('result-rank');
+  const timeEl = document.getElementById('result-time');
+  const retryBtn = document.getElementById('result-retry-btn');
+  if (iconEl && icon !== undefined) iconEl.innerHTML = icon;
+  if (titleEl && title !== undefined) titleEl.textContent = title;
+  if (scoreEl && score !== undefined) scoreEl.textContent = score;
+  if (rankEl && rank !== undefined) rankEl.textContent = rank;
+  if (timeEl && time !== undefined) timeEl.textContent = time;
+  if (retryBtn) retryBtn.style.display = showRetry ? 'block' : 'none';
+}
+
+// Manual retry after a terminal FAILED status — the queue already retried
+// automatically server-side (see submissionQueue.js) before giving up, so
+// polling further wouldn't help; re-submitting starts a fresh attempt at
+// queueing (still idempotent — the attempt id is unchanged).
+async function retrySubmit_() {
+  showSubmissionReceived_();
+  pollSubmissionStatus_(examState.attemptId);
   try {
-    const params = new URLSearchParams(location.search);
-    const id = params.get('id');
-    const timeTaken = Math.floor((Date.now() - examState.startTime) / 1000 / 60);
-    const data = await api('/exams/' + id + '/submit', {
+    await api('/attempts/' + examState.attemptId + '/submit', {
       method: 'POST',
-      body: JSON.stringify({ answers: examState.answers, timeTaken })
+      body: JSON.stringify({ answers: examState.answers })
     });
-    showResult(data);
   } catch (e) {}
 }
 
-function showResult(data) {
-  const modal = document.getElementById('result-modal');
-  if (modal) {
-    modal.style.display = 'flex';
-    document.getElementById('result-score').textContent = (data.score || 0) + '%';
-    document.getElementById('result-rank').textContent = 'ترتيبك: #' + (data.rank || '—');
-    document.getElementById('result-time').textContent = 'الوقت: ' + (data.timeTaken || '—') + ' دقيقة';
-  }
+// Graduated polling: 2s, 4s, 8s, then holds at 8s. Stops immediately on
+// COMPLETED or FAILED — never polls once a second, never polls forever,
+// and never keeps polling once there's nothing left to wait for.
+function pollSubmissionStatus_(attemptId) {
+  const delays = [2000, 4000, 8000];
+  let step = 0;
+  let stopped = false;
+
+  const poll = async () => {
+    if (stopped) return;
+    let data;
+    try {
+      data = await api('/attempts/' + attemptId + '/status');
+    } catch (e) {
+      // Connection hiccup — just try again on the same backoff schedule.
+    }
+    const status = data && data.ok && data.data && data.data.status;
+
+    if (status === 'COMPLETED') {
+      stopped = true;
+      showResult(data.data);
+      return;
+    }
+    if (status === 'FAILED') {
+      stopped = true;
+      setResultModalState_({
+        icon: '⚠️',
+        title: 'حدث خطأ أثناء حفظ الامتحان',
+        score: '', rank: 'إجاباتك محفوظة محليًا ولم تُفقد — جرّب "إعادة المحاولة"', time: '',
+        showRetry: true
+      });
+      return;
+    }
+
+    const delay = delays[Math.min(step, delays.length - 1)];
+    step += 1;
+    setTimeout(poll, delay);
+  };
+
+  setTimeout(poll, delays[0]);
 }
+
+function showResult(attempt) {
+  const modal = document.getElementById('result-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+
+  if (!attempt || attempt.resultsPublished === false) {
+    // Results not published yet — never show a score/rank the student
+    // wasn't meant to see, even transiently.
+    setResultModalState_({
+      icon: '✅', title: 'تم تسليم الامتحان!',
+      score: '', rank: 'تم تسليم الامتحان بنجاح.', time: 'سيتم إعلان النتيجة بعد اعتماد المعلم.',
+      showRetry: false
+    });
+    return;
+  }
+  const pct = Math.round(parseFloat(attempt.percentage) || 0);
+  const mins = Math.round((parseFloat(attempt.durationSeconds) || 0) / 60);
+  setResultModalState_({
+    icon: '🎉', title: 'تم تسليم الامتحان!',
+    score: pct + '%',
+    rank: attempt.needsManualGrading ? 'بعض الأسئلة تحتاج تصحيح يدوي' : '',
+    time: 'الوقت: ' + mins + ' دقيقة',
+    showRetry: false
+  });
+}
+
+function escapeAttr_(str) { return escapeHtml(str).replace(/"/g, '&quot;'); }
 
 // Dashboard
 async function loadDashboard() {
@@ -773,13 +1069,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (qrCode && codeInput) codeInput.value = qrCode;
     return;
   }
-  if (path.includes('index.html')) loadMyCourses();
-  if (path.includes('course.html')) loadCourse();
-  if (path.includes('exam.html')) loadExam();
-  if (path.includes('dashboard.html')) loadDashboard();
-  if (path.includes('video.html')) loadVideoPage();
-  if (path.includes('presentation.html')) loadPresentationPage();
-  if (path.includes('chat.html')) loadChatPage();
+  if (path.includes('index.html')) withPageLoader(loadMyCourses);
+  if (path.includes('course.html')) withPageLoader(loadCourse);
+  if (path.includes('exam.html')) withPageLoader(loadExam);
+  if (path.includes('dashboard.html')) withPageLoader(loadDashboard);
+  if (path.includes('video.html')) withPageLoader(loadVideoPage);
+  if (path.includes('presentation.html')) withPageLoader(loadPresentationPage);
+  if (path.includes('chat.html')) withPageLoader(loadChatPage);
 });
 
 // When the browser restores a page from its back/forward cache (e.g. the
