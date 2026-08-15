@@ -429,6 +429,32 @@ select:focus-visible, .btn:focus-visible, .opt:focus-within {
   font-weight: 700;
   font-family: monospace;
   letter-spacing: 1px;
+  transition: var(--transition);
+}
+/* Last minute of an exam — clear, calm urgency: color only, no motion
+   that could distract from actually finishing the exam. */
+.timer.timer-low {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(207,93,76,0.08);
+}
+
+/* Question navigator — answered vs. unanswered at a glance, so a student
+   can jump straight to what's left instead of re-reading every question. */
+.q-nav-pill {
+  width: 38px; height: 38px; border-radius: 50%; padding: 0;
+  border: 1px solid var(--border); background: var(--bg-card);
+  color: var(--text-secondary); font-weight: 600; font-size: 0.85rem;
+  cursor: pointer; transition: var(--transition);
+}
+.q-nav-pill:hover { border-color: var(--border-hover); }
+.q-nav-pill.answered {
+  background: rgba(79,157,143,0.12); border-color: var(--accent-2); color: var(--accent-2);
+}
+.q-nav-pill.current {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent; color: #1a1509;
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 .q-card {
   background: var(--bg-card);

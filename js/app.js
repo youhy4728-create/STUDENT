@@ -196,7 +196,58 @@ async function loadCourse() {
       <span class="badge badge-ok">✓ مسجل</span>
     `;
     renderUnits(c.units || []);
+    renderVocabList_(c.vocabulary || []);
   } catch (e) { toast('❌ فشل تحميل الكورس'); }
+}
+
+// Course vocabulary — AI-read words/phrases (Web Speech API, no audio
+// files). Same idea as the Listening-question player on the exam page.
+function speakText_(text, lang, rate, onEnd) {
+  if (!text) return;
+  if (!('speechSynthesis' in window)) { toast('❌ متصفحك مش بيدعم النطق الصوتي'); return; }
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = lang || 'en-US';
+  utter.rate = parseFloat(rate) || 1;
+  if (onEnd) { utter.onend = utter.onerror = onEnd; }
+  window.speechSynthesis.speak(utter);
+}
+
+function renderVocabList_(words) {
+  const list = document.getElementById('vocab-list');
+  const empty = document.getElementById('vocab-empty');
+  if (!list) return;
+  if (!words.length) {
+    list.innerHTML = '';
+    if (empty) empty.style.display = 'block';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  const langLabels = { 'en-US': 'EN', 'en-GB': 'EN', 'ar-EG': 'AR' };
+  list.innerHTML = words.map((w, i) => `
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 18px; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-md);">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span class="badge badge-info">${langLabels[w.lang] || w.lang}</span>
+        <span style="font-weight:600; font-size:1.05rem;">${escapeHtml(w.text)}</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <select class="inp" id="vocab-rate-${i}" style="width:auto; padding:6px 10px; font-size:0.8rem;">
+          <option value="0.7">أبطأ</option>
+          <option value="1" selected>عادي</option>
+          <option value="1.3">أسرع</option>
+        </select>
+        <button class="btn btn-primary" id="vocab-play-${i}" style="padding:6px 16px;" onclick="playVocabWord_(${i}, ${JSON.stringify(w.text)}, '${w.lang}')">▶ تشغيل</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function playVocabWord_(i, text, lang) {
+  const rateSel = document.getElementById('vocab-rate-' + i);
+  const rate = rateSel ? rateSel.value : 1;
+  const btn = document.getElementById('vocab-play-' + i);
+  if (btn) { btn.disabled = true; btn.textContent = '🔊 بيتكلم...'; }
+  speakText_(text, lang, rate, () => { if (btn) { btn.disabled = false; btn.textContent = '▶ تشغيل'; } });
 }
 
 function renderUnits(units) {
@@ -385,26 +436,93 @@ function renderExam() {
     <div class="q-card" data-idx="${i}" data-qid="${q.id}" style="display:${i===0?'block':'none'}">
       <span class="q-num">السؤال ${i+1}</span>
       <p class="q-text">${escapeHtml(q.text)}</p>
-      ${q.type === 'listening' && q.audioUrl ? `<audio class="q-audio" controls preload="none" src="${escapeAttr_(q.audioUrl)}">متصفحك لا يدعم الصوت</audio>` : ''}
+      ${q.type === 'listening' ? renderListeningPlayer_(q) : ''}
       <div class="opts" data-qid="${q.id}">${renderQuestionInput(q)}</div>
     </div>
   `).join('');
   updateProg();
-  renderQNav();
+
+  // Answer clicks are handled by ONE delegated listener instead of an
+  // inline onclick per option. Found during a review: the old inline
+  // onclick embedded the option's raw TEXT straight into the HTML
+  // attribute (`onclick="pickOpt('id', ${JSON.stringify(opt)})"`) — if an
+  // option ever contained a double-quote character (e.g. an English
+  // question quoting a phrase, or a possessive like "student's"), the
+  // browser's HTML parser would read that quote as the END of the
+  // onclick attribute and silently truncate/break the handler. That
+  // option would then just... not respond to clicks. Delegation reads
+  // the option's value from examState.questions (the actual data),
+  // never from re-parsed HTML/JS-in-an-attribute, so no amount of
+  // punctuation in the question text can break it. Attached once, on
+  // the container that's never itself replaced (only its children are).
+  if (!container.dataset.delegated) {
+    container.dataset.delegated = '1';
+    container.addEventListener('click', (e) => {
+      const optEl = e.target.closest('.opt');
+      if (!optEl || !container.contains(optEl)) return;
+      const optsWrap = optEl.closest('.opts');
+      const qId = optsWrap && optsWrap.dataset.qid;
+      const q = examState.questions.find((x) => x.id === qId);
+      if (!q) return;
+      const idx = Array.from(optsWrap.children).indexOf(optEl);
+      if (q.type === 'truefalse') {
+        pickOpt(qId, idx === 0 ? 'true' : 'false');
+      } else if (q.type === 'multi') {
+        toggleMultiOpt(qId, q.options[idx]);
+      } else {
+        pickOpt(qId, q.options[idx]);
+      }
+    });
+  }
+}
+
+// Listening questions play one of two ways:
+//  - ttsText: the browser's own AI voice reads it aloud (Web Speech API) —
+//    no audio file, no upload, no hosting, works the instant it's typed.
+//  - audioUrl: the older file-upload path, kept for exams already using it.
+// Nothing plays automatically and nothing is fetched until the student
+// actually presses play — this never blocks or slows down opening the exam.
+function renderListeningPlayer_(q) {
+  if (q.ttsText) {
+    const rate = parseFloat(q.ttsRate) || 1;
+    return `
+      <div class="tts-player" data-qid="${q.id}">
+        <button type="button" class="btn btn-secondary" id="tts-btn-${q.id}" onclick="playListeningTts_('${q.id}')">▶ تشغيل</button>
+        <select class="inp" id="tts-rate-${q.id}" style="width:auto; display:inline-block; margin-right:8px;">
+          <option value="0.7"${rate===0.7?' selected':''}>أبطأ</option>
+          <option value="1"${rate===1||!q.ttsRate?' selected':''}>عادي</option>
+          <option value="1.3"${rate===1.3?' selected':''}>أسرع</option>
+        </select>
+      </div>`;
+  }
+  if (q.audioUrl) {
+    return `<audio class="q-audio" controls preload="none" src="${escapeAttr_(q.audioUrl)}">متصفحك لا يدعم الصوت</audio>`;
+  }
+  return '';
+}
+
+function playListeningTts_(qId) {
+  const q = examState.questions.find((x) => x.id === qId);
+  if (!q || !q.ttsText) return;
+  const rateSel = document.getElementById('tts-rate-' + qId);
+  const rate = rateSel ? rateSel.value : (q.ttsRate || 1);
+  const btn = document.getElementById('tts-btn-' + qId);
+  if (btn) { btn.disabled = true; btn.textContent = '🔊 بيتكلم...'; }
+  speakText_(q.ttsText, q.ttsLang, rate, () => { if (btn) { btn.disabled = false; btn.textContent = '▶ تشغيل'; } });
 }
 
 function renderQuestionInput(q) {
   const current = examState.answers[q.id];
   if (q.type === 'mcq' || q.type === 'listening') {
     return (q.options || []).map((opt) => `
-      <label class="opt ${current === opt ? 'sel' : ''}" onclick="pickOpt('${q.id}', ${JSON.stringify(opt)})">
+      <label class="opt ${current === opt ? 'sel' : ''}">
         <input type="radio" name="q${q.id}" ${current === opt ? 'checked' : ''}>
         <span>${escapeHtml(opt)}</span>
       </label>`).join('');
   }
   if (q.type === 'truefalse') {
     return ['true', 'false'].map((v) => `
-      <label class="opt ${String(current) === v ? 'sel' : ''}" onclick="pickOpt('${q.id}', ${v})">
+      <label class="opt ${String(current) === v ? 'sel' : ''}">
         <input type="radio" name="q${q.id}" ${String(current) === v ? 'checked' : ''}>
         <span>${v === 'true' ? 'صح' : 'غلط'}</span>
       </label>`).join('');
@@ -412,7 +530,7 @@ function renderQuestionInput(q) {
   if (q.type === 'multi') {
     const selected = Array.isArray(current) ? current : [];
     return (q.options || []).map((opt) => `
-      <label class="opt ${selected.includes(opt) ? 'sel' : ''}" onclick="toggleMultiOpt('${q.id}', ${JSON.stringify(opt)})">
+      <label class="opt ${selected.includes(opt) ? 'sel' : ''}">
         <input type="checkbox" ${selected.includes(opt) ? 'checked' : ''}>
         <span>${escapeHtml(opt)}</span>
       </label>`).join('');
@@ -427,7 +545,8 @@ function renderQuestionInput(q) {
 // Selecting an option updates just that question's option list in place
 // (not the whole exam) — this is what stops a <audio> listening player
 // from being torn down and restarted every time an answer is picked, and
-// avoids re-rendering all N questions for a single click.
+// avoids re-rendering all N questions for a single click. The click
+// itself is handled by the delegated listener set up once in renderExam().
 function updateAnswer_(qId, value) {
   examState.answers[qId] = value;
   dirtyAnswerKeys.add(qId);
@@ -452,12 +571,24 @@ function setTextAnswer(qId, value) {
   updateProg();
 }
 
+function isAnswered_(value) {
+  return value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0);
+}
+
 function renderQNav() {
   const nav = document.getElementById('q-nav');
   if (!nav) return;
-  nav.innerHTML = examState.questions.map((_, i) => `
-    <button class="btn btn-sm ${i===examState.current?'btn-primary':'btn-secondary'}" style="width:36px; height:36px; padding:0; border-radius:50%;" onclick="goQ(${i})">${i+1}</button>
-  `).join('');
+  nav.innerHTML = examState.questions.map((q, i) => {
+    const answered = isAnswered_(examState.answers[q.id]);
+    const isCurrent = i === examState.current;
+    // Clear at a glance: filled = answered, outlined = still empty,
+    // glowing ring = the one you're on right now — so a student can jump
+    // straight to what's left instead of paging through everything again.
+    let cls = 'q-nav-pill';
+    if (isCurrent) cls += ' current';
+    if (answered) cls += ' answered';
+    return `<button type="button" class="${cls}" onclick="goQ(${i})" title="${answered ? 'تمت الإجابة' : 'لسه من غير إجابة'}">${i+1}</button>`;
+  }).join('');
   document.getElementById('prev-btn').disabled = examState.current === 0;
   const next = document.getElementById('next-btn');
   if (examState.current === examState.questions.length - 1) {
@@ -470,20 +601,25 @@ function renderQNav() {
   document.getElementById('submit-btn').disabled = false;
 }
 
-function goQ(n) { examState.current = n; document.querySelectorAll('.q-card').forEach((c, i) => c.style.display = i === n ? 'block' : 'none'); renderQNav(); }
+function goQ(n) {
+  // Stop any TTS still speaking the previous question — otherwise it
+  // keeps talking over the next question the student's now looking at.
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  examState.current = n;
+  document.querySelectorAll('.q-card').forEach((c, i) => c.style.display = i === n ? 'block' : 'none');
+  renderQNav();
+}
 function nextQ() { if (examState.current < examState.questions.length - 1) goQ(examState.current + 1); }
 function prevQ() { if (examState.current > 0) goQ(examState.current - 1); }
 
 function updateProg() {
   const total = examState.questions.length;
-  const ans = Object.keys(examState.answers).filter(k => {
-    const v = examState.answers[k];
-    return v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0);
-  }).length;
+  const ans = examState.questions.filter((q) => isAnswered_(examState.answers[q.id])).length;
   const fill = document.getElementById('progress-fill');
   const txt = document.getElementById('progress-text');
   if (fill) fill.style.width = total ? (ans / total * 100) + '%' : '0%';
   if (txt) txt.textContent = ans + ' / ' + total;
+  renderQNav(); // keep the navigator's answered/unanswered pills in sync
 }
 
 // ===== Autosave =====
@@ -494,6 +630,10 @@ let autosaveInt;
 function startAutosaveLoop() {
   clearInterval(autosaveInt);
   autosaveInt = setInterval(runAutosave, 10000);
+  // Defensive: remove before re-adding, so if this is ever called more
+  // than once in one page life (it isn't today, but nothing enforces
+  // that), the browser doesn't end up firing autosave twice on unload.
+  window.removeEventListener('beforeunload', runAutosave);
   window.addEventListener('beforeunload', runAutosave);
 }
 async function runAutosave() {
@@ -531,7 +671,13 @@ function startTimer() {
     const sec = Math.max(0, Math.round((examState.expiresAt - Date.now()) / 1000));
     const m = Math.floor(sec / 60).toString().padStart(2, '0');
     const s = (sec % 60).toString().padStart(2, '0');
-    if (el) el.textContent = m + ':' + s;
+    if (el) {
+      el.textContent = m + ':' + s;
+      // Clear visual urgency in the last minute — color alone (not a
+      // popup, not a sound) so it doesn't interrupt whatever the student
+      // is doing, but it's impossible to miss.
+      el.classList.toggle('timer-low', sec <= 60 && sec > 0);
+    }
     if (sec <= 0) { clearInterval(timerInt); confirmSubmit(); }
   };
   tick();
@@ -558,6 +704,7 @@ async function confirmSubmit() {
   closeModal();
   clearInterval(timerInt);
   clearInterval(autosaveInt);
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   const confirmBtn = document.querySelector('#submit-modal .btn-primary');
   toast('⏳ جاري تسليم الامتحان...');
   await withButtonLock(confirmBtn, 'جاري التسليم...', async () => {
