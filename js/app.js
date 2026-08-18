@@ -43,7 +43,7 @@ function showPageLoader() {
   if (document.querySelector('.mfx-page-loader')) return;
   const el = document.createElement('div');
   el.className = 'mfx-page-loader';
-  el.innerHTML = '<div class="mfx-page-loader-ring"></div>';
+  el.innerHTML = '<div class="mfx-page-loader-content"><div class="mfx-page-loader-ring"></div><div class="mfx-page-loader-credit">صنع بواسطة يوسف ماهر</div></div>';
   document.body.appendChild(el);
 }
 function hidePageLoader() {
@@ -213,7 +213,10 @@ function speakText_(text, lang, rate, onEnd) {
   window.speechSynthesis.speak(utter);
 }
 
+let currentCourseVocab = [];
+
 function renderVocabList_(words) {
+  currentCourseVocab = words || [];
   const list = document.getElementById('vocab-list');
   const empty = document.getElementById('vocab-empty');
   if (!list) return;
@@ -236,18 +239,29 @@ function renderVocabList_(words) {
           <option value="1" selected>عادي</option>
           <option value="1.3">أسرع</option>
         </select>
-        <button class="btn btn-primary" id="vocab-play-${i}" style="padding:6px 16px;" onclick="playVocabWord_(${i}, ${JSON.stringify(w.text)}, '${w.lang}')">▶ تشغيل</button>
+        <button class="btn btn-primary" id="vocab-play-${i}" style="padding:6px 16px;" onclick="playVocabWord_(${i})">▶ تشغيل</button>
       </div>
     </div>
   `).join('');
 }
 
-function playVocabWord_(i, text, lang) {
+// Found a real bug: the play button used to build its onclick as
+// `playVocabWord_(0, ${JSON.stringify(w.text)}, ...)` — JSON.stringify
+// always wraps a string in DOUBLE quotes, and that was sitting inside an
+// HTML onclick="..." attribute which is ALSO double-quoted. That breaks
+// the attribute for literally every word, not just ones with special
+// characters — the button never worked at all. Fixed by only ever
+// passing a plain integer index through the attribute and looking the
+// actual word up from currentCourseVocab (the real data), never
+// round-tripping arbitrary text through generated HTML/JS.
+function playVocabWord_(i) {
+  const word = currentCourseVocab[i];
+  if (!word) return;
   const rateSel = document.getElementById('vocab-rate-' + i);
-  const rate = rateSel ? rateSel.value : 1;
+  const rate = rateSel ? rateSel.value : (word.rate || 1);
   const btn = document.getElementById('vocab-play-' + i);
   if (btn) { btn.disabled = true; btn.textContent = '🔊 بيتكلم...'; }
-  speakText_(text, lang, rate, () => { if (btn) { btn.disabled = false; btn.textContent = '▶ تشغيل'; } });
+  speakText_(word.text, word.lang, rate, () => { if (btn) { btn.disabled = false; btn.textContent = '▶ تشغيل'; } });
 }
 
 function renderUnits(units) {
