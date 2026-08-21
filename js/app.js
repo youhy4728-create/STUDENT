@@ -287,6 +287,7 @@ function renderUnits(units) {
         </div>
       </div>
       <div class="accordion-content">
+        ${u.content ? `<div style="padding:12px; margin-bottom:10px; background:var(--bg); border-radius:var(--radius-md); line-height:1.8; white-space:pre-wrap;">${u.content}</div>` : ''}
         <div style="display:flex; flex-direction:column; gap:8px;">
           ${(u.videos || []).map(v => `
             <a href="video.html?id=${v.id}" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--bg); border-radius:var(--radius-md); text-decoration:none; color:inherit;">
