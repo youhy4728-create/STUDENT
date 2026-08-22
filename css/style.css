@@ -756,6 +756,23 @@ tr:hover td { background: rgba(244,228,193,0.03); }
   .auth-card { padding: 36px 24px; }
   .dash-sidebar { display: none; }
   .dash-main { margin-right: 0; padding: 80px 16px 16px; }
+
+  /* Video / presentation viewer pages (video.html, presentation.html):
+     on a phone, every extra pixel of top padding and side margin pushes
+     the actual player further down and makes it narrower for no reason —
+     this is the single biggest "does this feel made for my phone" cue,
+     so the player gets almost the full screen width and the page starts
+     right under the navbar instead of leaving a big empty gap. */
+  .viewer-section { padding: 74px 0 24px !important; }
+  .viewer-container { padding: 0 8px !important; }
+  .viewer-frame-wrap { border-radius: 10px !important; }
+}
+
+@media (max-width: 480px) {
+  /* Very small phones: shave the last bit of side margin so the frame
+     is essentially edge-to-edge, matching how a native video app looks. */
+  .viewer-container { padding: 0 4px !important; }
+  .viewer-frame-wrap { border-radius: 6px !important; }
 }
 
 /* ===== Global loading spinner (lightweight, no heavy animation) ===== */
